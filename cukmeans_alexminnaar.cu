@@ -55,6 +55,16 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints, int *d_clust_assn, flo
 	//get idx of thread at the block level
 	const int s_idx = threadIdx.x;
 
+    //put the datapoints and corresponding cluster assignments in shared memory so that they can be summed by thread 0 later
+	__shared__ float s_datapoints[TPB*2];
+	s_datapoints[s_idx*2]= d_datapoints[idx*2];
+    s_datapoints[s_idx*2+1]= d_datapoints[idx*2+1];
+
+	__shared__ int s_clust_assn[TPB];
+	s_clust_assn[s_idx] = d_clust_assn[idx];
+
+	__syncthreads();
+
 	// it is the thread with idx 0 (in each block) that sums up all the values within the shared array for the block it is in
     // COMMENT: this part could maybe be optimized? (could end up being 1 thread doing most of the computation)
 	if(s_idx==0) {
@@ -62,9 +72,9 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints, int *d_clust_assn, flo
 		int b_clust_sizes[MAX_K]={0};
 
 		for(int j=0; j< blockDim.x; ++j) {
-			int clust_id = d_clust_assn[j + blockIdx.x*blockDim.x];
-			b_clust_datapoint_sums[2*clust_id]+=d_datapoints[2*j + 2*blockIdx.x*blockDim.x];
-            b_clust_datapoint_sums[2*clust_id+1]+=d_datapoints[2*j+1 + 2*blockIdx.x*blockDim.x];
+            int clust_id = s_clust_assn[j];
+			b_clust_datapoint_sums[2*clust_id]+=s_datapoints[2*j];
+            b_clust_datapoint_sums[2*clust_id+1]+=s_datapoints[2*j+1];
 			b_clust_sizes[clust_id]+=1;
 		}
 
@@ -79,7 +89,7 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints, int *d_clust_assn, flo
 	__syncthreads();
 
 	//currently centroids are just sums, so divide by size to get actual centroids
-	if(idx < K){
+	if(idx < K && d_clust_sizes[idx] != 0){
 		d_centroids[idx] = d_centroids[idx]/d_clust_sizes[idx]; 
 	}
 
@@ -88,14 +98,22 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints, int *d_clust_assn, flo
 
 int main(int argc, char* argv[] )
 {
+
     if (argc < 4) {
-        std::cerr << "usage: k-means <data-file> <k> <n> [iterations]" << std::endl; // where n is the number of datapoints of the form (x1, x2)
+        std::cerr << "usage: k-means <data-file> <k> [iterations]" << std::endl;
         std::exit(EXIT_FAILURE);
     }
 
-    const auto k = std::atoi(argv[2]);
-    const auto n = std::atoi(argv[3]);
-    const auto number_of_iterations = (argc == 5) ? std::atoi(argv[4]) : 300;
+    const auto k = std::atoi(argv[3]);//num of output/centroids
+    const auto number_of_iterations = (argc == 5) ? std::atoi(argv[4]) : 300; 
+
+    std::ifstream stream(argv[2]);
+    std::string line;
+    const int n = (int) std::count(std::istreambuf_iterator<char>(stream), 
+                                      std::istreambuf_iterator<char>(), '\n'); //count lines
+    stream.clear();
+    stream.seekg(0);
+
 
     // COMMENT: this way of storing data would limit the number of points in the dataset it is allowed to take
     // COMMENT: this also assumes knowledge of the number of points in the dataset
@@ -105,16 +123,12 @@ int main(int argc, char* argv[] )
 	float *h_datapoints = (float*)malloc(2*n*sizeof(float));
 	int *h_clust_sizes = (int*)malloc(k*sizeof(int));
 
-    std::ifstream stream(argv[1]);
-    std::string line;
     int i = 0;
     while (std::getline(stream, line)) {
         std::istringstream line_stream(line);
-        float x, y;
         uint16_t label;
-        line_stream >> x >> y >> label;
-        h_datapoints[2*i] = x;
-        h_datapoints[2*i+1] = y;
+        line_stream >> h_datapoints[2*i] >> h_datapoints[2*i+1] >> label;
+        i++;
     }
 
 	//allocate memory on the device for the data points
@@ -134,10 +148,10 @@ int main(int argc, char* argv[] )
 	srand(time(0));
 
 	//initialize centroids
-    for(int c=0;c<k;++c)
-	{
-		h_centroids[c*2]=(float) rand() / (double)RAND_MAX;
-        h_centroids[c*2+1]=(float) rand() / (double)RAND_MAX;
+    for (int c=0;c<k;c++){
+		int random_index = (float) rand() / (double)RAND_MAX * n;
+        h_centroids[c*2] = h_datapoints[random_index*2];
+        h_centroids[c*2+1] = h_datapoints[random_index*2+1];
 		h_clust_sizes[c]=0;
 	}
 
@@ -185,18 +199,18 @@ int main(int argc, char* argv[] )
     //code for timing
     const auto end = std::chrono::high_resolution_clock::now();
     const auto duration = std::chrono::duration_cast<std::chrono::duration<float>>(end - start);
-    std::cerr << "Standard CUDA implementation Took: " << duration.count() << "s" << " for "<< n <<" points."<<std::endl;
+    std::cerr << "alexminnaar CUDA implementation Took: " << duration.count() << "s" << " for "<< n <<" points."<<std::endl;
     float std_time_used = duration.count();
     
 
     FILE *fp;
 
-    fp = fopen("Standardtimes.txt", "a");
+    fp = fopen("alexminnaartimes.txt", "a");
         fprintf(fp, "%0.6f\n", std_time_used);
     fclose(fp);
 
     std::string str(std::to_string(n)),str1,str2;
-    str = "output/" + str;
+    str = "output/alexminnaar/" + str;
     
     str2 = str + "_centroids.txt";
     fp = fopen(str2.c_str(), "w");
@@ -205,5 +219,4 @@ int main(int argc, char* argv[] )
     }
     free(h_centroids);
     fclose(fp);
-
 }
