@@ -55,22 +55,6 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints, int *d_clust_assn, flo
 	//get idx of thread at the block level
 	const int s_idx = threadIdx.x;
 
-	//put the datapoints and corresponding cluster assignments in shared memory so that they can be summed by thread 0 later
-	__shared__ float s_datapoints[2*TPB];
-    
-	s_datapoints[2*s_idx]= d_datapoints[2*idx];
-    s_datapoints[2*s_idx+1]= d_datapoints[2*idx+1];
-
-	__shared__ int s_clust_assn[TPB];
-	s_clust_assn[s_idx] = d_clust_assn[idx];
-
-
-	s_datapoints[2*s_idx]= d_datapoints[2*idx];
-    s_datapoints[2*s_idx+1]= d_datapoints[2*idx+1];
-
-
-	__syncthreads();
-
 	// it is the thread with idx 0 (in each block) that sums up all the values within the shared array for the block it is in
     // COMMENT: this part could maybe be optimized? (could end up being 1 thread doing most of the computation)
 	if(s_idx==0) {
@@ -78,9 +62,9 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints, int *d_clust_assn, flo
 		int b_clust_sizes[MAX_K]={0};
 
 		for(int j=0; j< blockDim.x; ++j) {
-			int clust_id = s_clust_assn[j];
-			b_clust_datapoint_sums[2*clust_id]+=s_datapoints[2*j];
-            b_clust_datapoint_sums[2*clust_id+1]+=s_datapoints[2*j+1];
+			int clust_id = d_clust_assn[j + blockIdx.x*blockDim.x];
+			b_clust_datapoint_sums[2*clust_id]+=d_datapoints[2*j + 2*blockIdx.x*blockDim.x];
+            b_clust_datapoint_sums[2*clust_id+1]+=d_datapoints[2*j+1 + 2*blockIdx.x*blockDim.x];
 			b_clust_sizes[clust_id]+=1;
 		}
 
@@ -104,14 +88,14 @@ __global__ void kMeansCentroidUpdate(float *d_datapoints, int *d_clust_assn, flo
 
 int main(int argc, char* argv[] )
 {
-    if (argc < 5) {
+    if (argc < 4) {
         std::cerr << "usage: k-means <data-file> <k> <n> [iterations]" << std::endl; // where n is the number of datapoints of the form (x1, x2)
         std::exit(EXIT_FAILURE);
     }
 
-    const auto k = std::atoi(argv[3]);
-    const auto n = std::atoi(argv[4]);
-    const auto number_of_iterations = (argc == 6) ? std::atoi(argv[5]) : 300;
+    const auto k = std::atoi(argv[2]);
+    const auto n = std::atoi(argv[3]);
+    const auto number_of_iterations = (argc == 5) ? std::atoi(argv[4]) : 300;
 
     // COMMENT: this way of storing data would limit the number of points in the dataset it is allowed to take
     // COMMENT: this also assumes knowledge of the number of points in the dataset
@@ -121,7 +105,7 @@ int main(int argc, char* argv[] )
 	float *h_datapoints = (float*)malloc(2*n*sizeof(float));
 	int *h_clust_sizes = (int*)malloc(k*sizeof(int));
 
-    std::ifstream stream(argv[2]);
+    std::ifstream stream(argv[1]);
     std::string line;
     int i = 0;
     while (std::getline(stream, line)) {
@@ -169,9 +153,12 @@ int main(int argc, char* argv[] )
     const int threads = TPB;
     const int blocks = (n + threads - 1) / threads;
 	
-    while(cur_iter < number_of_iterations) {
+    while(cur_iter < number_of_iterations)
+	{
 		//call cluster assignment kernel
 		kMeansClusterAssignment<<<blocks,threads>>>(d_datapoints,d_clust_assn,d_centroids,k,n);
+
+        cudaDeviceSynchronize();
 
 		//reset centroids and cluster sizes (will be updated in the next kernel)
 		cudaMemset(d_centroids,0.0,2*k*sizeof(float));
@@ -181,6 +168,7 @@ int main(int argc, char* argv[] )
 		kMeansCentroidUpdate<<<blocks,threads>>>(d_datapoints,d_clust_assn,d_centroids,d_clust_sizes,k,n);
 
 		cur_iter+=1;
+        cudaDeviceSynchronize();
 	}
 
     cudaMemcpy(h_centroids,d_centroids,2*k*sizeof(float),cudaMemcpyDeviceToHost);
@@ -208,7 +196,7 @@ int main(int argc, char* argv[] )
     fclose(fp);
 
     std::string str(std::to_string(n)),str1,str2;
-    str = "output/standard/" + str;
+    str = "output/" + str;
     
     str2 = str + "_centroids.txt";
     fp = fopen(str2.c_str(), "w");
